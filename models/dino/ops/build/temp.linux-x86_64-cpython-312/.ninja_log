@@ -1,0 +1,4 @@
+# ninja log v5
+1	2505	1751361610944471522	/home/ufuk/Desktop/Repositories/transformer-detection/object-detectors/DINO/models/dino/ops/build/temp.linux-x86_64-cpython-312/home/ufuk/Desktop/Repositories/transformer-detection/object-detectors/DINO/models/dino/ops/src/cpu/ms_deform_attn_cpu.o	e6104758b5482e87
+2	7850	1751361616287559752	/home/ufuk/Desktop/Repositories/transformer-detection/object-detectors/DINO/models/dino/ops/build/temp.linux-x86_64-cpython-312/home/ufuk/Desktop/Repositories/transformer-detection/object-detectors/DINO/models/dino/ops/src/vision.o	3eec8abf26758362
+2	10850	1751361619284609242	/home/ufuk/Desktop/Repositories/transformer-detection/object-detectors/DINO/models/dino/ops/build/temp.linux-x86_64-cpython-312/home/ufuk/Desktop/Repositories/transformer-detection/object-detectors/DINO/models/dino/ops/src/cuda/ms_deform_attn_cuda.o	ed827ecedacde0e8
