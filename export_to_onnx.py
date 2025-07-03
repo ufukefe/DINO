@@ -8,7 +8,7 @@ python export_to_onnx.py \
   -c object-detectors/DINO/config/DINO/custom_dataset_swin.py \
   -r object-detectors/DINO/logs/DINO/custom_training_swinL_from_scratch_resumed/checkpoint_best_regular.pth \
   -o dino_swinL_dynamic.onnx \
-  --input_size 800 800 \
+  --input_size 1080 1920 \
   --batch_size 1 \
   --device cpu \
   --opset 17 \
@@ -41,7 +41,7 @@ def parse_args():
     p.add_argument("-c", "--config_file", required=True)
     p.add_argument("-r", "--resume",       required=True, help="checkpoint *.pth")
     p.add_argument("-o", "--output",       default="dino_model.onnx")
-    p.add_argument("--input_size",  nargs=2, type=int, default=[800, 800],
+    p.add_argument("--input_size",  nargs=2, type=int, default=[1080, 1920],
                    metavar=("H", "W"), help="dummy H W for tracing")
     p.add_argument("--batch_size", type=int, default=1)
     p.add_argument("--opset",      type=int, default=17)

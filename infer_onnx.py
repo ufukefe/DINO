@@ -84,6 +84,28 @@ def postprocess(
     confs  = scores[np.arange(scores.shape[0]), labels]
 
     keep = confs > prob_thres
+    
+    # Add basic NMS suppression
+    if boxes.shape[1] == 4:  # (cx,cy,w,h)
+        boxes = cxcywh_to_xyxy_norm(boxes)
+    elif boxes.shape[1] == 5:  # (cx,cy,w,h, conf)
+        boxes = cxcywh_to_xyxy_norm(boxes[:, :-1])
+        confs = boxes[:, -1]
+    else:
+        raise ValueError(f"Unexpected box shape {boxes.shape}")
+    
+    # Apply NMS
+    indices = cv2.dnn.NMSBoxes(
+        boxes[keep].tolist(), confs[keep].tolist(),
+        score_threshold=prob_thres,
+        nms_threshold=0.5,
+        top_k=10, # limit to top 10 detections
+    )
+    if indices is not None:
+        keep[keep] = np.isin(np.arange(len(keep)), indices.flatten())
+    else:
+        keep[keep] = False
+    # If no boxes are left after NMS, return empty list
     if not keep.any():
         return []
 
