@@ -27,3 +27,4 @@ scripts/
 *.png
 *.jpg
 *.jpeg
+*.onnx
