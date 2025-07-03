@@ -1,117 +1,177 @@
-# object-detectors/DINO/infer_onnx.py
+#!/usr/bin/env python3
+"""
+infer_onnx.py
+=============
+
+Run inference with a DINO ONNX model that was exported with `export_to_onnx.py`.
+
+Example
+-------
+python infer_onnx.py \
+    -c object-detectors/DINO/config/DINO/custom_dataset_swin.py \    # ignored
+    -r object-detectors/DINO/logs/DINO/custom_training_swinL_from_scratch_resumed/checkpoint_best_regular.pth \   # ignored
+    -m dino_swinL.onnx \
+    --image_path "/path/to/image.png" \
+    --output_dir "inference_results/single_image_test" \
+    --threshold 0.4 \
+    --device cuda               # or cpu
+"""
+
+from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
-import torch
-import numpy as np
-from PIL import Image
+from typing import Tuple, List
+
 import cv2
-import onnxruntime
+import numpy as np
+import onnxruntime as ort
 
-# --- DINO-specific imports for post-processing ---
-from models.registry import MODULE_BUILD_FUNCS
-from util.slconfig import SLConfig
-import datasets.transforms as T
 
-def get_args_parser():
-    """Parses command-line arguments for ONNX inference."""
-    parser = argparse.ArgumentParser('DINO ONNX Inference Script', add_help=False)
-    
-    parser.add_argument('--onnx_path', '-m', type=str, required=True, help="Path to the exported ONNX model file.")
-    parser.add_argument('--config_file', '-c', type=str, required=True, help="Path to the original model config file for post-processing setup.")
-    parser.add_argument('--image_path', type=str, required=True, help="Path to a single image for inference.")
-    
-    parser.add_argument('--output_dir', default='onnx_inference_results', help="Directory to save the output visualization.")
-    parser.add_argument('--threshold', type=float, default=0.3, help="Confidence threshold to filter predictions.")
-    parser.add_argument('--device', default='gpu', choices=['cpu', 'gpu'], help="Device to run inference on ('cpu' or 'gpu').")
-    
-    return parser
+# -----------------------------------------------------------------------------#
+#                               Helper functions                               #
+# -----------------------------------------------------------------------------#
+def load_image(path: str | Path) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Returns
+    -------
+    img_rgb : np.ndarray  uint8  [H, W, 3]  RGB
+    img_proc: np.ndarray  float32 [1, 3, H, W]  normalized for DINO
+    """
+    img_bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    if img_bgr is None:
+        raise FileNotFoundError(path)
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
-def main(args):
-    """Main function to run inference with the ONNX model."""
-    print(f"Loading ONNX model for {args.device.upper()} execution...")
-    
-    # --- 1. Set up ONNX Runtime Session ---
-    providers = ['CUDAExecutionProvider'] if args.device == 'gpu' else ['CPUExecutionProvider']
-    try:
-        session = onnxruntime.InferenceSession(args.onnx_path, providers=providers)
-    except Exception as e:
-        print(f"Error loading ONNX model. Make sure onnxruntime-gpu is installed if using --device gpu. Error: {e}")
-        return
+    img = img_rgb.astype(np.float32) / 255.0
+    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(1, 1, 3)
+    std  = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(1, 1, 3)
+    img = (img - mean) / std
 
-    input_names = [i.name for i in session.get_inputs()]
-    output_names = [o.name for o in session.get_outputs()]
-    print(f"Running on provider: {session.get_providers()}")
+    img = np.transpose(img, (2, 0, 1))[None]        # 1×3×H×W
+    return img_rgb, img.astype(np.float32)
 
-    # --- 2. Load DINO Config for Post-Processor ---
-    cfg = SLConfig.fromfile(args.config_file)
-    _, _, postprocessors = MODULE_BUILD_FUNCS.get(cfg.modelname)(cfg)
-    postprocessor = postprocessors['bbox']
-    
-    # --- 3. Prepare Image and Inputs ---
-    img_path = Path(args.image_path)
-    original_img = Image.open(img_path).convert("RGB")
 
-    transform = T.Compose([
-        T.RandomResize([800], max_size=1333),
-        T.ToTensor(),
-        T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-    ])
-    image_tensor, _ = transform(original_img, None)
-    
-    images_np = image_tensor.unsqueeze(0).numpy()
-    # Create a dummy mask. For single image inference without padding, it's all False.
-    mask_np = np.zeros((1, images_np.shape[2], images_np.shape[3]), dtype=bool)
-    
-    onnx_inputs = {input_names[0]: images_np, input_names[1]: mask_np}
+def softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
+    e = np.exp(x - np.max(x, axis=axis, keepdims=True))
+    return e / e.sum(axis=axis, keepdims=True)
 
-    # --- 4. Run Inference ---
-    print(f"Running inference on {img_path.name}...")
-    onnx_outputs = session.run(output_names, onnx_inputs)
-    pred_logits_np, pred_boxes_np = onnx_outputs
 
-    # --- 5. Post-process the Output ---
-    outputs = {'pred_logits': torch.from_numpy(pred_logits_np), 'pred_boxes': torch.from_numpy(pred_boxes_np)}
-    orig_size = torch.as_tensor([original_img.height, original_img.width]).unsqueeze(0)
-    results = postprocessor(outputs, orig_size)[0]
-    
-    scores = results['scores']
-    labels = results['labels']
-    boxes = results['boxes']
+def cxcywh_to_xyxy_norm(boxes: np.ndarray) -> np.ndarray:
+    """(cx,cy,w,h) → (x0,y0,x1,y1)   all values still in [0,1]"""
+    cxy = boxes[..., :2]
+    wh  = boxes[..., 2:]
+    xy0 = cxy - 0.5 * wh
+    xy1 = cxy + 0.5 * wh
+    return np.concatenate([xy0, xy1], axis=-1)
 
-    keep = scores > args.threshold
-    
-    # --- 6. Visualize and Save ---
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Replace with your actual class names if needed
-    CLASS_LABELS = {i: f'class_{i}' for i in range(cfg.num_classes)}
 
-    visualize_and_save(
-        original_img, boxes[keep], labels[keep], scores[keep],
-        CLASS_LABELS, output_dir / f"pred_{img_path.name}"
+def postprocess(
+    logits: np.ndarray,
+    boxes: np.ndarray,
+    prob_thres: float,
+    img_size: Tuple[int, int],
+) -> List[Tuple[int, float, Tuple[int, int, int, int]]]:
+    """
+    Returns list of (label, score, (x0,y0,x1,y1)) in pixel coordinates.
+    """
+    H, W = img_size
+    probs = softmax(logits, axis=-1)                 # [Nq, C]
+    scores = probs[..., 1:]                          # drop class 0 = "no-object"
+
+    labels = np.argmax(scores, axis=-1)
+    confs  = scores[np.arange(scores.shape[0]), labels]
+
+    keep = confs > prob_thres
+    if not keep.any():
+        return []
+
+    boxes_xyxy = cxcywh_to_xyxy_norm(boxes[keep])    # [K, 4]
+    boxes_xyxy[:, [0, 2]] *= W
+    boxes_xyxy[:, [1, 3]] *= H
+    boxes_xyxy = boxes_xyxy.round().astype(int)
+
+    return [
+        (int(lbl), float(score), tuple(bbox))
+        for lbl, score, bbox in zip(labels[keep], confs[keep], boxes_xyxy)
+    ]
+
+
+def draw(
+    img: np.ndarray,
+    detections: List[Tuple[int, float, Tuple[int, int, int, int]]],
+    class_names: List[str] | None = None,
+) -> np.ndarray:
+    out = img.copy()
+    for lbl, score, (x0, y0, x1, y1) in detections:
+        cv2.rectangle(out, (x0, y0), (x1, y1), (255, 0, 0), 2)
+        name = class_names[lbl] if class_names else f"cls{lbl}"
+        cv2.putText(
+            out,
+            f"{name}:{score:.2f}",
+            (x0, y0 - 6),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 0, 0),
+            1,
+            cv2.LINE_AA,
+        )
+    return out
+
+
+# -----------------------------------------------------------------------------#
+#                                 CLI parsing                                  #
+# -----------------------------------------------------------------------------#
+def get_args() -> argparse.Namespace:
+    ap = argparse.ArgumentParser("DINO-ONNX inference")
+    ap.add_argument("-c", "--config_file", type=str, help="(ignored)")
+    ap.add_argument("-r", "--resume", type=str, help="(ignored)")
+    ap.add_argument("-m", "--model", required=True, type=str, help="ONNX model")
+    ap.add_argument("--image_path", required=True, type=str, help="Path to image")
+    ap.add_argument("--output_dir", default="onnx_infer_out", type=str)
+    ap.add_argument("--threshold", default=0.4, type=float, help="Score threshold")
+    ap.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
+    return ap.parse_args()
+
+
+# -----------------------------------------------------------------------------#
+#                                    Main                                      #
+# -----------------------------------------------------------------------------#
+def main() -> None:
+    args = get_args()
+    img_rgb, img_in = load_image(args.image_path)
+    H, W, _ = img_rgb.shape
+
+    providers = (
+        ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        if args.device == "cuda"
+        else ["CPUExecutionProvider"]
     )
-    print(f"\nInference complete. Output saved in: {output_dir}")
+    sess = ort.InferenceSession(str(args.model), providers=providers)
+    inp_name = sess.get_inputs()[0].name
+    logits, boxes = sess.run(None, {inp_name: img_in})
 
-def visualize_and_save(image, boxes, labels, scores, class_labels, path):
-    """Draws prediction boxes on an image and saves it."""
-    img_cv = np.array(image.copy())
-    img_cv = cv2.cvtColor(img_cv, cv2.COLOR_RGB2BGR)
-    
-    for box, label_id, score in zip(boxes.tolist(), labels.tolist(), scores.tolist()):
-        x1, y1, x2, y2 = map(int, box)
-        label_text = class_labels.get(label_id, f"CLS-{label_id}")
-        color = (0, 255, 0)
-        
-        cv2.rectangle(img_cv, (x1, y1), (x2, y2), color, 2)
-        text = f"{label_text}: {score:.2f}"
-        cv2.putText(img_cv, text, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-        
-    cv2.imwrite(str(path), img_cv)
-    print(f"  Saved visualization to {path}")
+    logits = logits[0]     # (Nq, C)
+    boxes  = boxes[0]      # (Nq, 4)
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser('DINO ONNX Inference Script', parents=[get_args_parser()])
-    args = parser.parse_args()
-    main(args)
+    detections = postprocess(logits, boxes, args.threshold, (H, W))
+    print(f"{len(detections)} detections ≥ {args.threshold}")
+
+    vis = draw(img_rgb, detections)
+
+    out_dir = Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / Path(args.image_path).name.replace(".", "_det.")
+    cv2.imwrite(str(out_path), cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
+    print(f"saved → {out_path}")
+
+    # optionally dump raw detections
+    det_txt = out_path.with_suffix(".txt")
+    with open(det_txt, "w") as f:
+        for lbl, score, (x0, y0, x1, y1) in detections:
+            f.write(f"{lbl} {score:.4f} {x0} {y0} {x1} {y1}\n")
+
+
+if __name__ == "__main__":
+    main()
