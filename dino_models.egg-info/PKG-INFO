@@ -1,0 +1,8 @@
+Metadata-Version: 2.2
+Name: dino-models
+Version: 0.1.0
+Summary: DINO object-detector research code
+License-File: LICENSE
+Requires-Dist: torch
+Dynamic: requires-dist
+Dynamic: summary
