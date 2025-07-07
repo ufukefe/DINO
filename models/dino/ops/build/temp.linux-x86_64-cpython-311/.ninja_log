@@ -1,0 +1,7 @@
+# ninja log v5
+0	2595	1751640887458841286	/DINO/models/dino/ops/build/temp.linux-x86_64-cpython-311/DINO/models/dino/ops/src/cpu/ms_deform_attn_cpu.o	2f3c4fc0f5640611
+0	8387	1751640893252938066	/DINO/models/dino/ops/build/temp.linux-x86_64-cpython-311/DINO/models/dino/ops/src/vision.o	f918e0bc15c0e9bd
+0	10100	1751640894960966596	/DINO/models/dino/ops/build/temp.linux-x86_64-cpython-311/DINO/models/dino/ops/src/cuda/ms_deform_attn_cuda.o	28df9ce241d340d0
+3	2670	1751875171804196020	/opt/object-detectors/DINO/models/dino/ops/build/temp.linux-x86_64-cpython-311/opt/object-detectors/DINO/models/dino/ops/src/cpu/ms_deform_attn_cpu.o	60f600a870a03af3
+3	8770	1751875177906295665	/opt/object-detectors/DINO/models/dino/ops/build/temp.linux-x86_64-cpython-311/opt/object-detectors/DINO/models/dino/ops/src/vision.o	2f8cda8be5282ee4
+3	10498	1751875179629323802	/opt/object-detectors/DINO/models/dino/ops/build/temp.linux-x86_64-cpython-311/opt/object-detectors/DINO/models/dino/ops/src/cuda/ms_deform_attn_cuda.o	75bfca6a0a7d74d

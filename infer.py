@@ -1,6 +1,7 @@
 import argparse
 import json
 from pathlib import Path
+import time  # Import the time module
 
 import torch
 import numpy as np
@@ -82,7 +83,7 @@ def main(args):
 
     # --- Prepare Image Paths and Ground Truths ---
     image_paths = []
-    targets_by_filename = {} # --- CORRECTED: Use filename as key for GTs ---
+    targets_by_filename = {}
     
     if args.image_path:
         image_paths.append(Path(args.image_path))
@@ -91,7 +92,6 @@ def main(args):
                       list(Path(args.image_dir).glob('*.jpg'))
     elif args.coco_path:
         coco_root = Path(args.coco_path)
-        # --- CORRECTED: Use the --split argument ---
         split_dir_name = f"{args.split}2017"
         ann_file = coco_root / "annotations" / f"instances_{args.split}2017.json"
         
@@ -99,7 +99,6 @@ def main(args):
         with open(ann_file, 'r') as f:
             coco_data = json.load(f)
         
-        # --- CORRECTED: Build a mapping from filename to annotations ---
         img_id_to_filename = {img['id']: img['file_name'] for img in coco_data['images']}
         
         for ann in coco_data['annotations']:
@@ -119,6 +118,31 @@ def main(args):
         for img_info in coco_data['images']:
             image_paths.append(coco_root / split_dir_name / img_info['file_name'])
             
+    # ==============================================================================
+    # --- WARM-UP RUN (Important for accurate GPU timing) ---
+    # The first inference can have overhead. We run a dummy inference to warm up.
+    # ==============================================================================
+    if device.type == 'cuda':
+        print("Performing a warm-up run on the GPU...")
+        dummy_input = torch.rand(1, 3, 800, 800).to(device)
+        with torch.no_grad():
+            model(dummy_input)
+        torch.cuda.synchronize()
+        print("Warm-up complete.")
+
+    # ==============================================================================
+    # --- TIMING SETUP ---
+    # ==============================================================================
+    # For pure model inference time
+    if device.type == 'cuda':
+        # Use torch.cuda.Event for precise GPU timing
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+
+    total_pure_inference_time_ms = 0
+    total_processing_time_s = 0
+    processed_image_count = 0
+
     # --- Inference Loop ---
     print(f"Found {len(image_paths)} images to process.")
     for img_path in image_paths:
@@ -128,12 +152,17 @@ def main(args):
             
         print(f"Processing: {img_path.name}")
         
+
         try:
             img = Image.open(img_path).convert("RGB")
         except Exception as e:
             print(f"  Could not open image {img_path}, skipping. Error: {e}")
             continue
 
+        # --- START: Total Processing Time Measurement ---
+        start_total_time = time.time()
+
+        # Pre-processing
         transform = T.Compose([
             T.RandomResize([800], max_size=1333),
             T.ToTensor(),
@@ -143,8 +172,26 @@ def main(args):
         image_tensor = image_tensor.unsqueeze(0).to(device)
 
         with torch.no_grad():
+            # --- START: Pure Model Inference Time Measurement ---
+            if device.type == 'cuda':
+                start_event.record()
+            else: # For CPU
+                start_inference_time = time.time()
+
             outputs = model(image_tensor)
 
+            if device.type == 'cuda':
+                end_event.record()
+                # Crucially, wait for the GPU to finish the work
+                torch.cuda.synchronize()
+                # Calculate elapsed time in milliseconds
+                pure_inference_time_ms = start_event.elapsed_time(end_event)
+            else: # For CPU
+                end_inference_time = time.time()
+                pure_inference_time_ms = (end_inference_time - start_inference_time) * 1000
+            # --- END: Pure Model Inference Time Measurement ---
+        
+        # Post-processing
         orig_size = torch.as_tensor([img.height, img.width]).unsqueeze(0).to(device)
         results = postprocessors["bbox"](outputs, orig_size)
         
@@ -153,13 +200,25 @@ def main(args):
         boxes = results[0]['boxes']
 
         keep = scores > args.threshold
+
+        # --- END: Total Processing Time Measurement ---
+        end_total_time = time.time()
+        total_img_processing_time_s = end_total_time - start_total_time
+
+        # Accumulate times for averaging
+        total_pure_inference_time_ms += pure_inference_time_ms
+        total_processing_time_s += total_img_processing_time_s
+        processed_image_count += 1
+        
+        # Print per-image results
+        print(f"  - Pure Model Inference Time: {pure_inference_time_ms:.2f} ms")
+        print(f"  - Total Processing Time (load+transform+infer+post): {total_img_processing_time_s:.4f} s")
         
         visualize_and_save(
             original_img=img,
             pred_boxes=boxes[keep],
             pred_labels=[CLASS_LABELS.get(l.item(), "Unknown") for l in labels[keep]],
             pred_scores=scores[keep],
-            # --- CORRECTED: Look up GT by filename ---
             ground_truth=targets_by_filename.get(img_path.name),
             gt_class_labels=CLASS_LABELS,
             output_path=output_dir / img_path.name,
@@ -167,7 +226,22 @@ def main(args):
             gt_color=GT_COLOR
         )
 
-    print("Inference complete. Outputs saved to:", args.output_dir)
+    print("\n--- Inference Complete ---")
+    print(f"Outputs saved to: {args.output_dir}")
+
+    # ==============================================================================
+    # --- FINAL AVERAGE TIMING REPORT ---
+    # ==============================================================================
+    if processed_image_count > 0:
+        avg_pure_inference_ms = total_pure_inference_time_ms / processed_image_count
+        avg_processing_s = total_processing_time_s / processed_image_count
+        print("\n--- Average Performance ---")
+        print(f"Processed {processed_image_count} images.")
+        print(f"Average Pure Model Inference Time: {avg_pure_inference_ms:.2f} ms per image")
+        print(f"Average Total Processing Time: {avg_processing_s:.4f} s per image ({1/avg_processing_s:.2f} FPS)")
+    else:
+        print("\nNo images were processed.")
+
 
 def visualize_and_save(original_img, pred_boxes, pred_labels, pred_scores, ground_truth, gt_class_labels, output_path, pred_color, gt_color):
     """Draws prediction and ground truth boxes on an image and saves it."""
